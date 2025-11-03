@@ -72,19 +72,32 @@ int main(int argc, char *argv[]) {
     // Build PowerShell command with all arguments
     char command[COMMAND_SIZE];
     int cmd_len = 0;
+    int written = 0;
 
     // Check if stdin is piped
     int is_piped = !_isatty(_fileno(stdin));
 
     if (is_piped) {
         // Use $input to receive piped data
-        cmd_len = snprintf(command, COMMAND_SIZE,
+        written = snprintf(command, COMMAND_SIZE,
             "powershell.exe -NoProfile -Command \"$input | Microsoft.PowerShell.Utility\\Select-String");
     } else {
         // Direct command without piped input
-        cmd_len = snprintf(command, COMMAND_SIZE,
+        written = snprintf(command, COMMAND_SIZE,
             "powershell.exe -NoProfile -Command \"Microsoft.PowerShell.Utility\\Select-String");
     }
+
+    // Check if snprintf failed or would overflow
+    if (written < 0) {
+        fprintf(stderr, "Error: Failed to format command string (snprintf encoding error)\n");
+        return EXIT_FAILURE;
+    }
+    if (written >= COMMAND_SIZE) {
+        fprintf(stderr, "Error: Command string too long (initial command: %d bytes, max: %d bytes)\n",
+                written, COMMAND_SIZE - 1);
+        return EXIT_FAILURE;
+    }
+    cmd_len = written;
 
     // Append all arguments
     for (int i = 1; i < argc; i++) {
@@ -98,19 +111,36 @@ int main(int argc, char *argv[]) {
         }
 
         if (needs_quotes) {
-            cmd_len += snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " '%s'", arg);
+            written = snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " '%s'", arg);
         } else {
-            cmd_len += snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " %s", arg);
+            written = snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " %s", arg);
         }
 
-        if (cmd_len >= COMMAND_SIZE - 100) {
-            fprintf(stderr, "Error: Command too long\n");
+        // Check if snprintf failed or would overflow
+        if (written < 0) {
+            fprintf(stderr, "Error: Failed to format argument (snprintf encoding error)\n");
             return EXIT_FAILURE;
         }
+        if (written >= COMMAND_SIZE - cmd_len) {
+            fprintf(stderr, "Error: Command string too long (after adding argument %d)\n", i);
+            fprintf(stderr, "Current length: %d bytes, attempted to add: %d bytes, max: %d bytes\n",
+                    cmd_len, written, COMMAND_SIZE - 1);
+            return EXIT_FAILURE;
+        }
+        cmd_len += written;
     }
 
     // Close the PowerShell command
-    cmd_len += snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, "\"");
+    written = snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, "\"");
+    if (written < 0) {
+        fprintf(stderr, "Error: Failed to close command string (snprintf encoding error)\n");
+        return EXIT_FAILURE;
+    }
+    if (written >= COMMAND_SIZE - cmd_len) {
+        fprintf(stderr, "Error: Command string too long (cannot add closing quote)\n");
+        return EXIT_FAILURE;
+    }
+    cmd_len += written;
 
     FILE *pipe = NULL;
     char *temp_file = NULL;
@@ -134,15 +164,52 @@ int main(int argc, char *argv[]) {
         // Copy stdin to temp file
         char buffer[BUFFER_SIZE];
         size_t bytes_read;
+        size_t bytes_written;
         while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, stdin)) > 0) {
-            fwrite(buffer, 1, bytes_read, temp);
+            bytes_written = fwrite(buffer, 1, bytes_read, temp);
+            if (bytes_written != bytes_read) {
+                fprintf(stderr, "Error: Failed to write data to temporary file\n");
+                fprintf(stderr, "Attempted to write %zu bytes, only wrote %zu bytes\n",
+                        bytes_read, bytes_written);
+                fclose(temp);
+                remove(temp_file);
+                free(temp_file);
+                return EXIT_FAILURE;
+            }
         }
+
+        // Check for read errors
+        if (ferror(stdin)) {
+            fprintf(stderr, "Error: Failed to read from stdin\n");
+            fclose(temp);
+            remove(temp_file);
+            free(temp_file);
+            return EXIT_FAILURE;
+        }
+
         fclose(temp);
 
         // Rebuild command to use Get-Content with the temp file
-        cmd_len = snprintf(command, COMMAND_SIZE,
+        written = snprintf(command, COMMAND_SIZE,
             "powershell.exe -NoProfile -Command \"Get-Content -Raw '%s' | Microsoft.PowerShell.Utility\\Select-String",
             temp_file);
+
+        // Check if snprintf failed or would overflow
+        if (written < 0) {
+            fprintf(stderr, "Error: Failed to format command with temp file (snprintf encoding error)\n");
+            remove(temp_file);
+            free(temp_file);
+            return EXIT_FAILURE;
+        }
+        if (written >= COMMAND_SIZE) {
+            fprintf(stderr, "Error: Command string too long (rebuild with temp file: %d bytes, max: %d bytes)\n",
+                    written, COMMAND_SIZE - 1);
+            fprintf(stderr, "Temp file path may be too long: %s\n", temp_file);
+            remove(temp_file);
+            free(temp_file);
+            return EXIT_FAILURE;
+        }
+        cmd_len = written;
 
         // Append all arguments again
         for (int i = 1; i < argc; i++) {
@@ -150,12 +217,44 @@ int main(int argc, char *argv[]) {
             int needs_quotes = (strchr(arg, ' ') != NULL);
 
             if (needs_quotes) {
-                cmd_len += snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " '%s'", arg);
+                written = snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " '%s'", arg);
             } else {
-                cmd_len += snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " %s", arg);
+                written = snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, " %s", arg);
             }
+
+            // Check if snprintf failed or would overflow
+            if (written < 0) {
+                fprintf(stderr, "Error: Failed to format argument in rebuild (snprintf encoding error)\n");
+                remove(temp_file);
+                free(temp_file);
+                return EXIT_FAILURE;
+            }
+            if (written >= COMMAND_SIZE - cmd_len) {
+                fprintf(stderr, "Error: Command string too long in rebuild (after adding argument %d)\n", i);
+                fprintf(stderr, "Current length: %d bytes, attempted to add: %d bytes, max: %d bytes\n",
+                        cmd_len, written, COMMAND_SIZE - 1);
+                remove(temp_file);
+                free(temp_file);
+                return EXIT_FAILURE;
+            }
+            cmd_len += written;
         }
-        cmd_len += snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, "\"");
+
+        // Close the command string
+        written = snprintf(command + cmd_len, COMMAND_SIZE - cmd_len, "\"");
+        if (written < 0) {
+            fprintf(stderr, "Error: Failed to close command string in rebuild (snprintf encoding error)\n");
+            remove(temp_file);
+            free(temp_file);
+            return EXIT_FAILURE;
+        }
+        if (written >= COMMAND_SIZE - cmd_len) {
+            fprintf(stderr, "Error: Command string too long in rebuild (cannot add closing quote)\n");
+            remove(temp_file);
+            free(temp_file);
+            return EXIT_FAILURE;
+        }
+        cmd_len += written;
     }
 
     // Open pipe to PowerShell (read mode)
@@ -172,8 +271,27 @@ int main(int argc, char *argv[]) {
     // Read and output results from PowerShell
     char buffer[BUFFER_SIZE];
     while (fgets(buffer, BUFFER_SIZE, pipe) != NULL) {
-        printf("%s", buffer);
+        if (printf("%s", buffer) < 0) {
+            fprintf(stderr, "Error: Failed to write output to stdout\n");
+            _pclose(pipe);
+            if (temp_file) {
+                remove(temp_file);
+                free(temp_file);
+            }
+            return EXIT_FAILURE;
+        }
         fflush(stdout);
+    }
+
+    // Check if loop ended due to error or EOF
+    if (ferror(pipe)) {
+        fprintf(stderr, "Error: Failed to read output from PowerShell\n");
+        _pclose(pipe);
+        if (temp_file) {
+            remove(temp_file);
+            free(temp_file);
+        }
+        return EXIT_FAILURE;
     }
 
     // Close pipe and get exit code
