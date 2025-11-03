@@ -29,6 +29,17 @@ static void print_version(void) {
     printf("%s version %s (PowerShell wrapper)\n", PROGRAM_NAME, VERSION);
 }
 
+static int check_powershell_available(void) {
+    // Try to execute a simple PowerShell command to verify it's available
+    FILE *test_pipe = _popen("powershell.exe -NoProfile -Command \"exit 0\" 2>nul", "r");
+    if (test_pipe == NULL) {
+        return 0;  // Failed to execute
+    }
+
+    int exit_code = _pclose(test_pipe);
+    return (exit_code == 0);  // Return 1 if successful, 0 otherwise
+}
+
 int main(int argc, char *argv[]) {
     // Parse arguments
     if (argc < 2) {
@@ -44,6 +55,18 @@ int main(int argc, char *argv[]) {
     if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
         print_version();
         return EXIT_SUCCESS;
+    }
+
+    // Check if PowerShell is available in PATH
+    if (!check_powershell_available()) {
+        fprintf(stderr, "Error: PowerShell not found in PATH\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "This program requires PowerShell to be installed and available in your PATH.\n");
+        fprintf(stderr, "Please ensure PowerShell is installed and accessible from the command line.\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "To verify PowerShell installation, try running:\n");
+        fprintf(stderr, "  powershell.exe -Command \"$PSVersionTable.PSVersion\"\n");
+        return EXIT_FAILURE;
     }
 
     // Build PowerShell command with all arguments
